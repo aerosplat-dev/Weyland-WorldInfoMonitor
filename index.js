@@ -1,404 +1,431 @@
-import { chat, chat_metadata, event_types, eventSource, main_api, saveSettingsDebounced } from '../../../../script.js';
+import {
+    chat_metadata,
+    event_types,
+    eventSource,
+    extension_prompt_roles,
+    extension_prompt_types,
+    saveSettingsDebounced,
+} from '../../../../script.js';
 import { metadata_keys } from '../../../authors-note.js';
 import { extension_settings } from '../../../extensions.js';
 import { promptManager } from '../../../openai.js';
+import { getRegexedString, regex_placement } from '../../../extensions/regex/engine.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
-import { delay } from '../../../utils.js';
-import { world_info_position } from '../../../world-info.js';
+import { DEFAULT_DEPTH, world_info_position } from '../../../world-info.js';
+import {
+    createCaptureState,
+    REFRESH_STATES,
+    shouldCaptureGeneration,
+} from './lib/captureState.js';
+import {
+    cloneAndNormalizeEntries,
+    getExactPromptOccurrenceRanks,
+    sortEntriesByPromptOrder,
+} from './lib/entries.js';
+import {
+    SORT_MODES,
+    getSettings,
+    setSortMode,
+} from './lib/settings.js';
+import {
+    SORT_LOREBOOKS,
+    SORT_PROMPT,
+    destroyMonitorWindow,
+    openMonitorWindow,
+    updateMonitorWindow,
+} from './lib/ui/monitorWindow.js';
+import { injectToolbarButton } from './lib/ui/toolbarButton.js';
+import { createGenerationScopeTracker } from './lib/runtimeScope.js';
 
-const strategy = {
-    constant: '🔵',
-    normal: '🟢',
-    vectorized: '🔗',
-};
-const getStrategy = (entry)=>{
-    if (entry.constant === true) {
-        return 'constant';
-    } else if (entry.vectorized === true) {
-        return 'vectorized';
-    } else {
-        return 'normal';
-    }
-};
+const MODULE_NAME = 'Weyland-WorldInfoMonitor';
+const SLASH_COMMAND_NAME = 'wi-triggered';
 
-let generationType;
-eventSource.on(event_types.GENERATION_STARTED, (genType)=>generationType = genType);
+let settings = getSettings(extension_settings);
+let toolbarHandle = null;
+let slashCommand = null;
+let activeOrderContext = null;
+let visibleOrderContext = createOrderContext(null, 'normal');
+const scopeTracker = createGenerationScopeTracker();
 
-const init = ()=>{
-    const trigger = document.createElement('div'); {
-        trigger.classList.add('stwii--trigger');
-        trigger.classList.add('fa-solid', 'fa-fw', 'fa-book-atlas');
-        trigger.title = 'Active WI\n---\nright click for options';
-        trigger.addEventListener('click', ()=>{
-            panel.classList.toggle('stwii--isActive');
-        });
-        trigger.addEventListener('contextmenu', (evt)=>{
-            evt.preventDefault();
-            configPanel.classList.toggle('stwii--isActive');
-        });
-        document.body.append(trigger);
-    }
-    const panel = document.createElement('div'); {
-        panel.classList.add('stwii--panel');
-        panel.innerHTML = '?';
-        document.body.append(panel);
-    }
-    const configPanel = document.createElement('div'); {
-        configPanel.classList.add('stwii--panel');
-        const rowGroup = document.createElement('label'); {
-            rowGroup.classList.add('stwii--configRow');
-            rowGroup.title = 'Group entries by World Info book';
-            const cb = document.createElement('input'); {
-                cb.type = 'checkbox';
-                cb.checked = extension_settings.worldInfoInfo?.group ?? true;
-                cb.addEventListener('click', ()=>{
-                    if (!extension_settings.worldInfoInfo) {
-                        extension_settings.worldInfoInfo = {};
-                    }
-                    extension_settings.worldInfoInfo.group = cb.checked;
-                    updatePanel(currentEntryList);
-                    saveSettingsDebounced();
-                });
-                rowGroup.append(cb);
+function normalizeActivatedEntries(entries) {
+    return cloneAndNormalizeEntries(entries, {
+        transformContent(content, entry) {
+            // The capture controller clones again when async sticky enrichment
+            // commits. Preserve the first WORLD_INFO regex result verbatim.
+            if (Object.hasOwn(entry, 'finalPromptContent')) {
+                return entry.finalPromptContent;
             }
-            const lbl = document.createElement('div'); {
-                lbl.textContent = 'Group by book';
-                rowGroup.append(lbl);
-            }
-            configPanel.append(rowGroup);
-        }
-        const orderRow = document.createElement('label'); {
-            orderRow.classList.add('stwii--configRow');
-            orderRow.title = 'Show in insertion depth / order instead of alphabetically';
-            const cb = document.createElement('input'); {
-                cb.type = 'checkbox';
-                cb.checked = extension_settings.worldInfoInfo?.order ?? true;
-                cb.addEventListener('click', ()=>{
-                    if (!extension_settings.worldInfoInfo) {
-                        extension_settings.worldInfoInfo = {};
-                    }
-                    extension_settings.worldInfoInfo.order = cb.checked;
-                    updatePanel(currentEntryList);
-                    saveSettingsDebounced();
-                });
-                orderRow.append(cb);
-            }
-            const lbl = document.createElement('div'); {
-                lbl.textContent = 'Show in order';
-                orderRow.append(lbl);
-            }
-            configPanel.append(orderRow);
-        }
-        const mesRow = document.createElement('label'); {
-            mesRow.classList.add('stwii--configRow');
-            mesRow.title = 'Indicate message history (only when ungrouped and shown in order)';
-            const cb = document.createElement('input'); {
-                cb.type = 'checkbox';
-                cb.checked = extension_settings.worldInfoInfo?.mes ?? true;
-                cb.addEventListener('click', ()=>{
-                    if (!extension_settings.worldInfoInfo) {
-                        extension_settings.worldInfoInfo = {};
-                    }
-                    extension_settings.worldInfoInfo.mes = cb.checked;
-                    updatePanel(currentEntryList);
-                    saveSettingsDebounced();
-                });
-                mesRow.append(cb);
-            }
-            const lbl = document.createElement('div'); {
-                lbl.textContent = 'Show messages';
-                mesRow.append(lbl);
-            }
-            configPanel.append(mesRow);
-        }
-        document.body.append(configPanel);
-    }
 
-    let entries = [];
+            const regexDepth = Number(entry.position) === world_info_position.atDepth
+                ? (entry.depth ?? DEFAULT_DEPTH)
+                : null;
 
-    let count = -1;
-    const updateBadge = async(newEntries)=>{
-        if (count != newEntries.length) {
-            if (newEntries.length == 0) {
-                trigger.classList.add('stwii--badge-out');
-                await delay(510);
-                trigger.setAttribute('data-stwii--badge-count', newEntries.length.toString());
-                trigger.classList.remove('stwii--badge-out');
-            } else if (count == 0) {
-                trigger.classList.add('stwii--badge-in');
-                trigger.setAttribute('data-stwii--badge-count', newEntries.length.toString());
-                await delay(510);
-                trigger.classList.remove('stwii--badge-in');
-            } else {
-                trigger.setAttribute('data-stwii--badge-count', newEntries.length.toString());
-                trigger.classList.add('stwii--badge-bounce');
-                await delay(1010);
-                trigger.classList.remove('stwii--badge-bounce');
-            }
-            count = newEntries.length;
-        } else if (new Set(newEntries).difference(new Set(entries)).size > 0) {
-            trigger.classList.add('stwii--badge-bounce');
-            await delay(1010);
-            trigger.classList.remove('stwii--badge-bounce');
-        }
-        entries = newEntries;
-    };
-    let currentEntryList = [];
-    let currentChat = [];
-    eventSource.on(event_types.WORLD_INFO_ACTIVATED, async(entryList)=>{
-        panel.innerHTML = 'Updating...';
-        updateBadge(entryList.map(it=>`${it.world}§§§${it.uid}`));
-        for (const entry of entryList) {
-            entry.type = 'wi';
-            entry.sticky = parseInt(/**@type {string}*/(await SlashCommandParser.commands['wi-get-timed-effect'].callback(
-                {
-                    effect: 'sticky',
-                    format: 'number',
-                    file: `${entry.world}`,
-                    _scope: null,
-                    _abortController: null,
-                },
-                entry.uid,
-            )));
-        }
-        currentEntryList = [...entryList];
-        updatePanel(entryList, true);
-    });
-
-
-    const updatePanel = (entryList, newChat = false)=>{
-        const isGrouped = extension_settings.worldInfoInfo?.group ?? true;
-        const isOrdered = extension_settings.worldInfoInfo?.order ?? true;
-        const isMes = extension_settings.worldInfoInfo?.mes ?? true;
-        panel.innerHTML = '';
-        let grouped;
-        if (isGrouped) {
-            grouped = Object.groupBy(entryList, (it,idx)=>it.world);
-        } else {
-            grouped = {
-                'WI Entries': [...entryList],
-            };
-        }
-        const depthPos = [world_info_position.ANBottom, world_info_position.ANTop, world_info_position.atDepth];
-        for (const [world, entries] of Object.entries(grouped)) {
-            for (const e of entries) {
-                e.depth = e.position == world_info_position.atDepth ? e.depth : (chat_metadata[metadata_keys.depth] + (e.position == world_info_position.ANTop ? 0.1 : 0));
-            }
-            const w = document.createElement('div'); {
-                w.classList.add('stwii--world');
-                w.textContent = world;
-                panel.append(w);
-                entries.sort((a,b)=>{
-                    if (isOrdered) {
-                        // order by strategy / depth / order
-                        if (!depthPos.includes(a.position) && !depthPos.includes(b.position)) return a.position - b.position;
-                        if (depthPos.includes(a.position) && !depthPos.includes(b.position)) return 1;
-                        if (!depthPos.includes(a.position) && depthPos.includes(b.position)) return -1;
-                        if ((a.depth ?? Number.MAX_SAFE_INTEGER) < (b.depth ?? Number.MAX_SAFE_INTEGER)) return 1;
-                        if ((a.depth ?? Number.MAX_SAFE_INTEGER) > (b.depth ?? Number.MAX_SAFE_INTEGER)) return -1;
-                        if ((a.order ?? Number.MAX_SAFE_INTEGER) > (b.order ?? Number.MAX_SAFE_INTEGER)) return 1;
-                        if ((a.order ?? Number.MAX_SAFE_INTEGER) < (b.order ?? Number.MAX_SAFE_INTEGER)) return -1;
-                        return (a.comment ?? a.key.join(', ')).toLowerCase().localeCompare((b.comment ?? b.key.join(', ')).toLowerCase());
-                    } else {
-                        // order alphabetically
-                        return (a.comment?.length ? a.comment : a.key.join(', '))
-                            .toLowerCase()
-                            .localeCompare(b.comment?.length ? b.comment : b.key.join(', '))
-                        ;
-                    }
-                });
-                if (!isGrouped && isOrdered && isMes) {
-                    const an = chat_metadata[metadata_keys.prompt];
-                    const ad = chat_metadata[metadata_keys.depth];
-                    if (an?.length) {
-                        const idx = entries.findIndex(e=>depthPos.includes(e.position) && e.depth <= ad);
-                        entries.splice(idx, 0, {
-                            type: 'note',
-                            position: world_info_position.ANBottom,
-                            depth: ad,
-                            text: an,
-                        });
-                    }
-                    if (newChat) {
-                        currentChat = [...chat];
-                        if (generationType == 'swipe') currentChat.pop();
-                    }
-                    const segmenter = new Intl.Segmenter('en', { granularity:'sentence' });
-                    let currentDepth = currentChat.length - 1;
-                    let isDumped = false;
-                    for (let i = entries.length - 1; i >= -1; i--) {
-                        if (i < 0 && currentDepth < 0) continue;
-                        if (isDumped) continue;
-                        if ((i < 0 && currentDepth >= 0) || !depthPos.includes(entries[i].position)) {
-                            // anything not @D is considered as "before chat"
-                            isDumped = true;
-                            const depth = -1;
-                            const mesList = currentChat.slice(depth + 1, currentDepth + 1);
-                            const text = mesList
-                                .map(it=>it.mes)
-                                .map(it=>it
-                                    .replace(/```.+```/gs, '')
-                                    .replace(/<[^>]+?>/g, '')
-                                    .trim()
-                                    ,
-                                )
-                                .filter(it=>it.length)
-                                .join('\n')
-                            ;
-                            const sentences = [...segmenter.segment(text)].map(it=>it.segment.trim());
-                            entries.splice(i + 1, 0, {
-                                type: 'mes',
-                                count: mesList.length,
-                                from: depth + 1,
-                                to: currentDepth,
-                                first: sentences.at(0),
-                                last: sentences.length > 1 ? sentences.at(-1) : null,
-                            });
-                            currentDepth = -1;
-                            continue;
-                        }
-                        let depth = Math.max(-1, currentChat.length - entries[i].depth - 1);
-                        if (depth >= currentDepth) continue;
-                        depth = Math.ceil(depth);
-                        if (depth == currentDepth) continue;
-                        const mesList = currentChat.slice(depth + 1, currentDepth + 1);
-                        const text = mesList
-                            .map(it=>it.mes)
-                            .map(it=>it
-                                .replace(/```.+```/gs, '')
-                                .replace(/<[^>]+?>/g, '')
-                                .trim()
-                                ,
-                            )
-                            .filter(it=>it.length)
-                            .join('\n')
-                        ;
-                        const sentences = [...segmenter.segment(text)].map(it=>it.segment.trim());
-                        entries.splice(i + 1, 0, {
-                            type: 'mes',
-                            count: mesList.length,
-                            from: depth + 1,
-                            to: currentDepth,
-                            first: sentences.at(0),
-                            last: sentences.length > 1 ? sentences.at(-1) : null,
-                        });
-                        currentDepth = depth;
-                    }
-                }
-                for (const entry of entries) {
-                    const e = document.createElement('div'); {
-                        e.classList.add('stwii--entry');
-                        const wipChar = [world_info_position.before, world_info_position.after];
-                        const wipEx = [world_info_position.EMTop, world_info_position.EMBottom];
-                        // not needed after all?
-                        if (false && [...wipChar, ...wipEx].includes(entry.position)) {
-                            if (main_api == 'openai') {
-                                const pm = promptManager.getPromptCollection().collection;
-                                if (wipChar.includes(entry.position) && !pm.find(it=>it.identifier == 'charDescription')) {
-                                    e.classList.add('stwii--isBroken');
-                                    e.title = '⚠️ Not sent because position anchor is missing (Char Description)!\n';
-                                } else if (wipEx.includes(entry.position) && !pm.find(it=>it.identifier == 'dialogueExamples')) {
-                                    e.classList.add('stwii--isBroken');
-                                    e.title = '⚠️ Not sent because position anchor is missing (Example Messages)!\n';
-                                }
-                            }
-                        } else {
-                            e.title = '';
-                        }
-                        if (entry.type == 'mes') e.classList.add('stwii--messages');
-                        if (entry.type == 'note') e.classList.add('stwii--note');
-                        const strat = document.createElement('div'); {
-                            strat.classList.add('stwii--strategy');
-                            if (entry.type == 'wi') {
-                                strat.textContent = strategy[getStrategy(entry)];
-                            } else if (entry.type == 'mes') {
-                                strat.classList.add('fa-solid', 'fa-fw', 'fa-comments');
-                                strat.setAttribute('data-stwii--count', entry.count.toString());
-                            } else if (entry.type == 'note') {
-                                strat.classList.add('fa-solid', 'fa-fw', 'fa-note-sticky');
-                            }
-                            e.append(strat);
-                        }
-                        const title = document.createElement('div'); {
-                            title.classList.add('stwii--title');
-                            if (entry.type == 'wi') {
-                                title.textContent = entry.comment?.length ? entry.comment : entry.key.join(', ');
-                                e.title += `[${entry.world}] ${entry.comment?.length ? entry.comment : entry.key.join(', ')}\n---\n${entry.content}`;
-                            } else if (entry.type == 'mes') {
-                                const first = document.createElement('div'); {
-                                    first.classList.add('stwii--first');
-                                    first.textContent = entry.first;
-                                    title.append(first);
-                                }
-                                if (entry.last) {
-                                    e.title = `Messages #${entry.from}-${entry.to}\n---\n${entry.first}\n...\n${entry.last}`;
-                                    const sep = document.createElement('div'); {
-                                        sep.classList.add('stwii--sep');
-                                        sep.textContent = '...';
-                                        title.append(sep);
-                                    }
-                                    const last = document.createElement('div'); {
-                                        last.classList.add('stwii--last');
-                                        last.textContent = entry.last;
-                                        title.append(last);
-                                    }
-                                } else {
-                                    e.title = `Message #${entry.from}\n---\n${entry.first}`;
-                                }
-                            } else if (entry.type == 'note') {
-                                title.textContent = 'Author\'s Note';
-                                e.title = `Author's Note\n---\n${entry.text}`;
-                            }
-                            e.append(title);
-                        }
-                        const sticky = document.createElement('div'); {
-                            sticky.classList.add('stwii--sticky');
-                            sticky.textContent = entry.sticky ? `📌 ${entry.sticky}` : '';
-                            sticky.title = `Sticky for ${entry.sticky} more rounds`;
-                            e.append(sticky);
-                        }
-                        panel.append(e);
-                    }
-                }
-            }
-        }
-    };
-
-    //! HACK: no event when no entries are activated, only a debug message
-    const original_debug = console.debug;
-    console.debug = function(...args) {
-        const triggers = [
-            '[WI] Found 0 world lore entries. Sorted by strategy',
-            '[WI] Adding 0 entries to prompt',
-        ];
-        if (triggers.includes(args[0])) {
-            panel.innerHTML = 'No active entries';
-            updateBadge([]);
-            currentEntryList = [];
-        }
-        return original_debug.bind(console)(...args);
-    };
-    const original_log = console.log;
-    console.log = function(...args) {
-        const triggers = [
-            '[WI] Found 0 world lore entries. Sorted by strategy',
-            '[WI] Adding 0 entries to prompt',
-        ];
-        if (triggers.includes(args[0])) {
-            panel.innerHTML = 'No active entries';
-            updateBadge([]);
-            currentEntryList = [];
-        }
-        return original_log.bind(console)(...args);
-    };
-
-    SlashCommandParser.addCommandObject(SlashCommand.fromProps({ name: 'wi-triggered',
-        callback: (args, value)=>{
-            return JSON.stringify(currentEntryList);
+            return getRegexedString(content, regex_placement.WORLD_INFO, {
+                depth: regexDepth,
+                isMarkdown: false,
+                isPrompt: true,
+            });
         },
+    });
+}
+
+const captureState = createCaptureState({
+    cloneEntries: normalizeActivatedEntries,
+    onChange: handleCaptureChange,
+});
+
+function toUiSortMode(sortMode) {
+    return sortMode === SORT_MODES.PROMPT_ORDER ? SORT_PROMPT : SORT_LOREBOOKS;
+}
+
+function toPersistedSortMode(sortMode) {
+    return sortMode === SORT_PROMPT ? SORT_MODES.PROMPT_ORDER : SORT_MODES.LOREBOOKS;
+}
+
+function asFiniteNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function getAuthorsNoteSnapshot() {
+    return {
+        authorsNotePosition: asFiniteNumber(
+            chat_metadata?.[metadata_keys.position],
+            extension_prompt_types.IN_CHAT,
+        ),
+        authorsNoteDepth: asFiniteNumber(
+            chat_metadata?.[metadata_keys.depth],
+            DEFAULT_DEPTH,
+        ),
+        authorsNoteRole: asFiniteNumber(
+            chat_metadata?.[metadata_keys.role],
+            extension_prompt_roles.SYSTEM,
+        ),
+    };
+}
+
+function getLiveMarkerSequence(generationType) {
+    try {
+        const collection = promptManager.getPromptCollection(generationType)?.collection;
+        return Array.isArray(collection)
+            ? collection.map(prompt => ({ identifier: prompt?.identifier }))
+            : [];
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] Could not read the active prompt order.`, error);
+        return [];
+    }
+}
+
+function createOrderContext(captureId, generationType) {
+    return {
+        captureId,
+        generationType: String(generationType ?? 'normal'),
+        markerSequence: getLiveMarkerSequence(generationType),
+        exactOccurrenceRanks: null,
+        activationEntries: null,
+        activationCommitted: false,
+        ...getAuthorsNoteSnapshot(),
+    };
+}
+
+function refreshOrderContext(orderContext) {
+    if (!orderContext) return;
+    orderContext.markerSequence = getLiveMarkerSequence(orderContext.generationType);
+    Object.assign(orderContext, getAuthorsNoteSnapshot());
+}
+
+function promoteOrderContext(orderContext) {
+    if (!orderContext) return;
+    visibleOrderContext = {
+        generationType: orderContext.generationType,
+        markerSequence: orderContext.markerSequence,
+        exactOccurrenceRanks: orderContext.exactOccurrenceRanks,
+        authorsNotePosition: orderContext.authorsNotePosition,
+        authorsNoteDepth: orderContext.authorsNoteDepth,
+        authorsNoteRole: orderContext.authorsNoteRole,
+    };
+}
+
+function getDisplayedEntries(state) {
+    if (settings.sortMode !== SORT_MODES.PROMPT_ORDER) {
+        return state.entries;
+    }
+
+    return sortEntriesByPromptOrder(state.entries, {
+        exactOccurrenceRanks: visibleOrderContext.exactOccurrenceRanks,
+        promptCollection: visibleOrderContext.markerSequence,
+        authorsNotePosition: visibleOrderContext.authorsNotePosition,
+        authorsNoteDepth: visibleOrderContext.authorsNoteDepth,
+        authorsNoteRole: visibleOrderContext.authorsNoteRole,
+        defaultDepth: DEFAULT_DEPTH,
+    });
+}
+
+function createWindowState(state = captureState.getState()) {
+    return {
+        entries: getDisplayedEntries(state),
+        sortMode: toUiSortMode(settings.sortMode),
+        refreshState: state.refreshState,
+        onSortModeChange: handleSortModeChange,
+        returnFocusTo: () => toolbarHandle?.getElement() ?? null,
+    };
+}
+
+function handleCaptureChange(state) {
+    if (
+        state.activeCaptureId !== null
+        && activeOrderContext?.captureId === state.activeCaptureId
+        && (
+            activeOrderContext.activationCommitted
+            || state.refreshState === REFRESH_STATES.CAPTURED
+        )
+    ) {
+        promoteOrderContext(activeOrderContext);
+    }
+
+    updateMonitorWindow(createWindowState(state));
+}
+
+function handleSortModeChange(sortMode) {
+    settings = setSortMode(extension_settings, toPersistedSortMode(sortMode));
+    saveSettingsDebounced();
+    updateMonitorWindow(createWindowState());
+}
+
+function handleToolbarClick() {
+    void openMonitorWindow(createWindowState()).catch((error) => {
+        console.error(`[${MODULE_NAME}] Could not open the monitor window.`, error);
+    });
+}
+
+function handleGenerationStarted(generationType, generationOptions, dryRun) {
+    const ignored = !shouldCaptureGeneration(generationType, dryRun);
+    const scope = scopeTracker.beginScope({
+        generationType,
+        dryRun,
+        ignored,
+    });
+    if (ignored) return;
+
+    const captureId = captureState.startGeneration(generationType, generationOptions, dryRun);
+    if (captureId === null) {
+        scope.ignored = true;
+        return;
+    }
+
+    scope.captureId = captureId;
+    scope.orderContext = createOrderContext(captureId, generationType);
+    activeOrderContext = scope.orderContext;
+}
+
+async function getStickyRounds(entry) {
+    try {
+        const command = SlashCommandParser.commands['wi-get-timed-effect'];
+        if (typeof command?.callback !== 'function') return 0;
+
+        const value = await command.callback(
+            {
+                effect: 'sticky',
+                format: 'number',
+                file: String(entry.world ?? ''),
+                _scope: null,
+                _abortController: null,
+            },
+            entry.uid,
+        );
+        const rounds = Number.parseInt(String(value), 10);
+        return Number.isFinite(rounds) && rounds > 0 ? rounds : 0;
+    } catch {
+        return 0;
+    }
+}
+
+async function enrichAndCommitActivation(scope, pending) {
+    try {
+        const enrichedEntries = await Promise.all(pending.entries.map(async entry => {
+            const stickyRounds = await getStickyRounds(entry);
+            return {
+                ...entry,
+                sticky: stickyRounds,
+                stickyRounds,
+            };
+        }));
+
+        if (
+            scope.captureId === pending.captureId
+            && activeOrderContext?.captureId === pending.captureId
+        ) {
+            activeOrderContext.activationEntries = enrichedEntries;
+            activeOrderContext.activationCommitted = true;
+        }
+        captureState.commitActivation(pending.captureId, enrichedEntries);
+    } catch (error) {
+        captureState.failActivation(pending.captureId);
+        console.error(`[${MODULE_NAME}] Could not enrich the activated entries.`, error);
+    }
+}
+
+function handleWorldInfoActivated(entries) {
+    const scope = scopeTracker.getCaptureScope();
+    if (!scope || scope.captureId !== captureState.getState().activeCaptureId) return;
+
+    try {
+        const pending = captureState.beginActivation(entries);
+        if (!pending || pending.captureId !== scope.captureId) return;
+
+        if (activeOrderContext?.captureId === pending.captureId) {
+            activeOrderContext.activationEntries = pending.entries;
+        }
+
+        void enrichAndCommitActivation(scope, pending);
+    } catch (error) {
+        if (scope.captureId !== null) captureState.failActivation(scope.captureId);
+        console.error(`[${MODULE_NAME}] Could not capture activated World Info entries.`, error);
+    }
+}
+
+function handleChatCompletionPromptReady(eventData) {
+    if (!Array.isArray(eventData?.chat)) return;
+
+    const scope = scopeTracker.attachPrompt(eventData.chat, eventData?.dryRun === true);
+    if (
+        !scope
+        || scope.ignored
+        || scope.captureId !== captureState.getState().activeCaptureId
+        || activeOrderContext?.captureId !== scope.captureId
+    ) {
+        return;
+    }
+
+    // Other generation listeners can alter Prompt Manager after start. Read
+    // marker and Author's Note settings at the actual assembly boundary.
+    refreshOrderContext(activeOrderContext);
+    activeOrderContext.exactOccurrenceRanks = Array.isArray(activeOrderContext.activationEntries)
+        ? getExactPromptOccurrenceRanks(
+            activeOrderContext.activationEntries,
+            eventData.chat,
+        )
+        : null;
+    if (activeOrderContext.activationCommitted) {
+        promoteOrderContext(activeOrderContext);
+        updateMonitorWindow(createWindowState());
+    }
+}
+
+function handleGenerateAfterData(generateData) {
+    const resolved = scopeTracker.resolveAfterData(generateData);
+    if (!resolved) return;
+
+    const { scope, matchedByIdentity } = resolved;
+    if (scope.ignored) {
+        // Dry Generate() returns at this boundary and emits no terminal event.
+        if (scope.dryRun) scopeTracker.markFinished(scope);
+        return;
+    }
+
+    const state = captureState.getState();
+    if (
+        scope.captureId === null
+        || state.activeCaptureId !== scope.captureId
+        || activeOrderContext?.captureId !== scope.captureId
+    ) {
+        return;
+    }
+
+    refreshOrderContext(activeOrderContext);
+    activeOrderContext.exactOccurrenceRanks = (
+        matchedByIdentity
+        && Array.isArray(scope.promptChat)
+        && Array.isArray(activeOrderContext.activationEntries)
+    )
+        ? getExactPromptOccurrenceRanks(
+            activeOrderContext.activationEntries,
+            scope.promptChat,
+        )
+        : null;
+
+    if (activeOrderContext.activationCommitted) {
+        promoteOrderContext(activeOrderContext);
+        updateMonitorWindow(createWindowState(state));
+    }
+    captureState.finalizeAfterData();
+}
+
+function handleGenerationFinished() {
+    const { scope, duplicate } = scopeTracker.finishCurrentScope();
+    if (!scope || duplicate || scope.ignored || scope.captureId === null) return;
+    if (captureState.getState().activeCaptureId !== scope.captureId) return;
+
+    // Once after-data has arrived, it is the authoritative finalizer. A slow
+    // detached sticky lookup may still commit afterward; do not cancel it.
+    if (!scope.afterDataSeen) {
+        captureState.stopGeneration();
+        if (activeOrderContext?.captureId === scope.captureId) {
+            activeOrderContext = null;
+        }
+    }
+}
+
+function handleChatChanged() {
+    scopeTracker.reset();
+    activeOrderContext = null;
+    visibleOrderContext = createOrderContext(null, 'normal');
+    captureState.changeChat();
+}
+
+function getTriggeredEntries() {
+    return JSON.stringify(captureState.getState().entries);
+}
+
+function registerSlashCommand() {
+    slashCommand = SlashCommand.fromProps({
+        name: SLASH_COMMAND_NAME,
+        callback: getTriggeredEntries,
         returns: 'list of triggered WI entries',
-        helpString: 'Get the list of World Info entries triggered on the last generation.',
-    }));
-};
-init();
+        helpString: 'Get the cloned list of World Info entries triggered on the last captured generation.',
+    });
+    SlashCommandParser.addCommandObject(slashCommand);
+}
+
+function unregisterSlashCommand() {
+    if (SlashCommandParser.commands[SLASH_COMMAND_NAME] === slashCommand) {
+        delete SlashCommandParser.commands[SLASH_COMMAND_NAME];
+    }
+    slashCommand = null;
+}
+
+function registerEventListeners() {
+    eventSource.on(event_types.GENERATION_STARTED, handleGenerationStarted);
+    eventSource.on(event_types.WORLD_INFO_ACTIVATED, handleWorldInfoActivated);
+    eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, handleChatCompletionPromptReady);
+    eventSource.on(event_types.GENERATE_AFTER_DATA, handleGenerateAfterData);
+    eventSource.on(event_types.GENERATION_STOPPED, handleGenerationFinished);
+    eventSource.on(event_types.GENERATION_ENDED, handleGenerationFinished);
+    eventSource.on(event_types.CHAT_CHANGED, handleChatChanged);
+}
+
+export function destroyWorldInfoMonitor() {
+    eventSource.removeListener(event_types.GENERATION_STARTED, handleGenerationStarted);
+    eventSource.removeListener(event_types.WORLD_INFO_ACTIVATED, handleWorldInfoActivated);
+    eventSource.removeListener(event_types.CHAT_COMPLETION_PROMPT_READY, handleChatCompletionPromptReady);
+    eventSource.removeListener(event_types.GENERATE_AFTER_DATA, handleGenerateAfterData);
+    eventSource.removeListener(event_types.GENERATION_STOPPED, handleGenerationFinished);
+    eventSource.removeListener(event_types.GENERATION_ENDED, handleGenerationFinished);
+    eventSource.removeListener(event_types.CHAT_CHANGED, handleChatChanged);
+    captureState.setOnChange(() => {});
+    scopeTracker.reset();
+    unregisterSlashCommand();
+    toolbarHandle?.destroy();
+    toolbarHandle = null;
+    destroyMonitorWindow();
+}
+
+function initialize() {
+    registerEventListeners();
+    registerSlashCommand();
+    toolbarHandle = injectToolbarButton(handleToolbarClick);
+    updateMonitorWindow(createWindowState());
+}
+
+initialize();

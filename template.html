@@ -1,0 +1,79 @@
+<div class="wim-portal" id="wim-portal" aria-hidden="true">
+    <section
+        class="wim-window"
+        id="wim-window"
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="wim-window-title"
+        tabindex="-1"
+        hidden
+    >
+        <header class="wim-titlebar" id="wim-titlebar">
+            <button
+                type="button"
+                class="wim-titlebar-button wim-back-button"
+                id="wim-back-button"
+                aria-label="Back to active World Info entries"
+                hidden
+            >
+                <span aria-hidden="true">&#8592;</span>
+            </button>
+            <div class="wim-title-lockup">
+                <span class="wim-wordmark">WEYLAND</span>
+                <span class="wim-window-title" id="wim-window-title">WORLD INFO MONITOR</span>
+            </div>
+            <div class="wim-titlebar-spacer"></div>
+            <button
+                type="button"
+                class="wim-titlebar-button wim-close-button"
+                id="wim-close-button"
+                aria-label="Close World Info Monitor"
+            >
+                <span aria-hidden="true">&times;</span>
+            </button>
+        </header>
+
+        <main class="wim-body" id="wim-body" data-view="list">
+            <section class="wim-list-view" id="wim-list-view" aria-label="Activated World Info entries">
+                <div class="wim-list-header">
+                    <div class="wim-capture-summary">
+                        <span class="wim-entry-count" id="wim-entry-count">0 active entries</span>
+                        <span class="wim-refresh-state" id="wim-refresh-state" role="status">No captured generation yet</span>
+                    </div>
+                    <div class="wim-sort-control" role="group" aria-label="Sort activated entries">
+                        <button
+                            type="button"
+                            class="wim-sort-button"
+                            data-sort-mode="lorebooks"
+                            aria-pressed="true"
+                        >
+                            Lorebooks
+                        </button>
+                        <button
+                            type="button"
+                            class="wim-sort-button"
+                            data-sort-mode="prompt"
+                            aria-pressed="false"
+                        >
+                            Prompt order
+                        </button>
+                    </div>
+                </div>
+                <div class="wim-entry-list" id="wim-entry-list"></div>
+            </section>
+
+            <section class="wim-detail-view" id="wim-detail-view" aria-labelledby="wim-detail-title">
+                <div class="wim-detail-heading">
+                    <div class="wim-detail-eyebrow" id="wim-detail-world"></div>
+                    <h2 class="wim-detail-title" id="wim-detail-title" tabindex="-1">World Info entry</h2>
+                </div>
+                <dl class="wim-detail-metadata" id="wim-detail-metadata"></dl>
+                <div class="wim-filtered-notice" id="wim-filtered-notice" role="note" hidden>
+                    Omitted after prompt filtering
+                </div>
+                <div class="wim-content-heading">Final prompt content</div>
+                <pre class="wim-final-content" id="wim-final-content" tabindex="0"></pre>
+            </section>
+        </main>
+    </section>
+</div>
