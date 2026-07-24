@@ -23,4 +23,4 @@ recent captured activation list.
 Weyland World Info Monitor is based on
 [SillyTavern-WorldInfoInfo](https://github.com/LenAnderson/SillyTavern-WorldInfoInfo)
 by LenAnderson. The 2.0 redesign and Weyland integration are maintained by
-Weyland Tavern.
+@aerosplat-dev.
