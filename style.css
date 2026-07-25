@@ -30,7 +30,7 @@
     top: max(12px, calc((100dvh - 600px) / 2));
     width: min(780px, calc(100dvw - 24px));
     height: min(600px, calc(100dvh - 24px));
-    min-width: min(480px, calc(100dvw - 24px));
+    min-width: min(384px, calc(100dvw - 24px));
     min-height: min(360px, calc(100dvh - 24px));
     max-width: calc(100dvw - 24px);
     max-height: calc(100dvh - 24px);
@@ -123,7 +123,9 @@
 .wim-entry-title { overflow: hidden; color: var(--wim-text); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .wim-entry-world { overflow: hidden; color: var(--wim-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .wim-entry-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; margin-top: 2px; color: var(--wim-muted); font-size: 9px; }
-.wim-entry-chip, .wim-entry-sticky { padding: 2px 5px; color: var(--wim-rose); background: rgba(180,38,58,.12); border: 1px solid rgba(180,38,58,.28); border-radius: 4px; text-transform: uppercase; }
+.wim-entry-activation { display: inline-flex; align-items: center; gap: 3px; line-height: 1; }
+.wim-entry-activation-icon { font: 12px/1 system-ui, sans-serif; }
+.wim-entry-sticky { color: var(--wim-rose); font-weight: 700; }
 .wim-entry-insertion { overflow-wrap: anywhere; }
 .wim-entry-chevron { flex: 0 0 auto; color: var(--wim-bright); font-size: 20px; }
 
